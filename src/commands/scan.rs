@@ -1,0 +1,162 @@
+use std::{env, path::PathBuf, str::FromStr};
+
+use clap::{Parser, ValueEnum};
+use serde::{Deserialize, Serialize};
+use tracing::{error, info};
+use url::Url;
+
+use super::Command;
+use crate::{
+    embedding::{
+        EmbeddingClientImpl, HuggingFaceEmbeddingClient, OllamaEmbeddingClient,
+        OpenAIEmbeddingClient,
+    },
+    prelude::*,
+    scanner::{CodebaseScanner, ScannerConfig},
+    storage::QdrantStorage,
+};
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct Address {
+    pub url: Url,
+    pub port: Option<u16>,
+}
+
+impl FromStr for Address {
+    type Err = Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let url = Url::parse(s).map_err(|e| InvalidArgument(f!("Unable to parse address {e}")))?;
+        let port = url.port();
+
+        Ok(Self { url, port })
+    }
+}
+
+#[derive(Debug, Clone, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ClientType {
+    Ollama,
+    OpenAI,
+    HuggingFace,
+}
+
+#[derive(Debug, Parser, Serialize, Deserialize)]
+struct Scan {
+    #[arg(long, value_enum)]
+    client: ClientType,
+
+    // Ollama-specific args
+    #[arg(long, required_if_eq("client", "Ollama"))]
+    address: Option<Address>,
+
+    #[arg(long, short)]
+    model: Option<String>,
+
+    /// Qdrant URL
+    #[arg(long, default_value = "http://localhost:6333")]
+    qdrant_url: String,
+
+    /// Filter by file extensions (comma-separated)
+    #[arg(short, long)]
+    extensions: Option<String>,
+
+    /// Chunk size limit (in bytes)
+    #[arg(short, long)]
+    chunk_size_limit: Option<usize>,
+
+    /// Path to the codebase root
+    #[arg(short, long)]
+    path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ClientConfig {
+    Ollama { address: Address, model: String },
+    OpenAI { api_key: String, model: String },
+    HuggingFace { api_key: String, model: String },
+}
+
+impl Command for Scan {
+    async fn execute(&self) -> Result<()> {
+        if !self.path.exists() {
+            error!("Path does not exist: {}", self.path.display());
+            return Err(NotFound(self.path));
+        }
+
+        let model = self.model.unwrap_or(
+            match self.client {
+                ClientType::Ollama => "nomic-embed-text",
+                ClientType::OpenAI => "gpt-4o",
+                ClientType::HuggingFace => "snowflake-arctic-embed-l-v2.0",
+            }
+            .to_string(),
+        );
+
+        let api_key = match self.client {
+            ClientType::Ollama => Ok(String::from("")),
+            ClientType::OpenAI => env::var("OPENAI_API_KEY"),
+            ClientType::HuggingFace => env::var("HUGGINGFACE_API_KEY"),
+        }
+        .map_err(|e| Missing(f!("API key environment variable not set")))?;
+
+        let address = self.address.or(match self.client {
+            ClientType::Ollama => Some(Address::from_str("http://localhost::11434")?),
+            // No other clients require an address atm
+            _ => None,
+        });
+
+        info!("Scanning codebase at {}", self.path.display());
+        info!("Using embedding model: {}", model);
+
+        // Parse extensions filter if provided
+        let extensions = self
+            .extensions
+            .map(|ext_str| ext_str.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
+
+        if let Some(ref exts) = extensions {
+            info!("Filtering by extensions: {}", exts.join(", "));
+        }
+
+        let embedding_client = match self.client {
+            ClientType::Ollama => {
+                let address = self.address.unwrap_or(Address::from_str("http://localhost::11434")?);
+                EmbeddingClientImpl::Ollama(OllamaEmbeddingClient::new(
+                    address.url.as_str(),
+                    address.port.unwrap_or(11434),
+                    &model,
+                    self.chunk_size_limit,
+                ))
+            },
+            ClientType::OpenAI =>
+                EmbeddingClientImpl::OpenAI(OpenAIEmbeddingClient::new(&api_key, &model)),
+            ClientType::HuggingFace =>
+                EmbeddingClientImpl::HuggingFace(HuggingFaceEmbeddingClient::new(&api_key, &model)),
+        };
+
+        let storage = QdrantStorage::new(&self.qdrant_url).await?;
+
+        info!("Starting codebase scan");
+        let scanner_config = ScannerConfig {
+            extensions,
+            chunk_size_limit: self.chunk_size_limit,
+        };
+
+        let mut scanner = CodebaseScanner::new(embedding_client.into(), storage, scanner_config);
+
+        match scanner.scan_codebase(&self.path).await {
+            Ok(results) => {
+                info!("Scan completed successfully");
+                info!("Processed {} code chunks", results.chunks_processed);
+                info!("Generated {} embeddings", results.embeddings_generated);
+                info!("Stored in collection: {}", self.collection);
+                Ok(())
+            },
+            Err(e) => {
+                error!("Scan failed: {}", e);
+                Err(ScanFailed)
+            },
+        }
+    }
+}

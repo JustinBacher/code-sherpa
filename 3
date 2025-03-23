@@ -1,0 +1,102 @@
+use std::{collections::HashMap, fs, path::Path};
+
+use serde::Deserialize;
+use tracing::{info, warn};
+use tree_sitter::{Language, Parser};
+use walkdir::WalkDir;
+
+use super::{
+    languages::Languages::{self, *},
+    results::ScanResults,
+};
+use crate::{chunking::extract_chunks, embedding::EmbeddingClient, prelude::*, storage::Storage};
+
+pub struct ScannerConfig {
+    pub chunk_size_limit: Option<usize>,
+}
+
+pub struct CodebaseScanner<E: EmbeddingClient, S: Storage> {
+    parser: Parser,
+    languages: HashMap<Languages, Language>,
+    embedding_client: E,
+    storage: S,
+    config: ScannerConfig,
+}
+
+impl<E: EmbeddingClient, S: Storage> CodebaseScanner<E, S> {
+    pub fn new(embedding_client: E, storage: S, config: ScannerConfig) -> Self {
+        let parser = Parser::new();
+        let mut languages = HashMap::new();
+
+        // Initialize supported languages
+        languages.insert(Rust, tree_sitter_rust::LANGUAGE.into());
+        languages.insert(Go, tree_sitter_go::LANGUAGE.into());
+        languages.insert(Python, tree_sitter_python::LANGUAGE.into());
+        languages.insert(JavaScript, tree_sitter_javascript::LANGUAGE.into());
+
+        Self {
+            parser,
+            languages,
+            embedding_client,
+            storage,
+            config,
+        }
+    }
+
+    pub async fn scan_codebase(&mut self, root: &Path) -> Result<ScanResults> {
+        let mut chunks = Vec::new();
+
+        for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+
+            if !path.is_file() {
+                continue;
+            }
+
+            if let Some(ext) = path.extension() {
+                if let Ok(ref lang) = Languages::deserialize(ext.to_string_lossy().to_string()) {
+                    // Skip if we're filtering by extension and this one isn't in the list
+                    if let Some(ref language) = self.languages.get(*ext).cloned() {
+                        match fs::read_to_string(path) {
+                            Ok(content) => match self.parse_file(path, &content, language) {
+                                Ok(file_chunks) => chunks.extend(file_chunks),
+                                Err(e) => warn!("Failed to parse {}: {}", path.display(), e),
+                            },
+                            Err(e) => warn!("Failed to read {}: {}", path.display(), e),
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Extracted {} chunks from codebase", chunks.len());
+
+        // Generate embeddings
+        let embeddings = self.embedding_client.embed(&chunks).await?;
+
+        info!("Generated {} embeddings", embeddings.len());
+
+        // Store the embeddings
+        self.storage.store_chunks(&chunks, &embeddings).await?;
+
+        Ok(ScanResults {
+            chunks_processed: chunks.len(),
+            embeddings_generated: embeddings.len(),
+        })
+    }
+
+    fn parse_file(
+        &mut self,
+        path: &Path,
+        content: &str,
+        language: &Language,
+    ) -> Result<Vec<crate::chunking::CodeChunk>> {
+        self.parser.set_language(language)?;
+
+        let tree = self.parser.parse(content, None).ok_or(ParsingFailed(path.to_path_buf()))?;
+
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("unknown");
+
+        Ok(extract_chunks(&tree, content, path, extension))
+    }
+}
