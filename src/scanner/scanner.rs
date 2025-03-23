@@ -14,7 +14,9 @@ use crate::{
 };
 
 pub struct ScannerConfig {
+    pub extensions: Option<Vec<String>>,
     pub chunk_size_limit: Option<usize>,
+    pub overlap_percentage: Option<usize>,
 }
 
 pub struct CodebaseScanner<E, S>
@@ -34,10 +36,8 @@ where
     S: Storage,
 {
     pub fn new(embedding_client: E, storage: S, config: ScannerConfig) -> Self {
-        let parser = Parser::new();
-
         Self {
-            parser,
+            parser: Parser::new(),
             embedding_client,
             storage,
             config,
@@ -52,6 +52,18 @@ where
 
             if !path.is_file() {
                 continue;
+            }
+
+            // Check file extension against filter if provided
+            if let Some(ref extensions) = self.config.extensions {
+                if let Some(ext) = path.extension() {
+                    let ext_str = ext.to_string_lossy().to_string();
+                    if !extensions.contains(&ext_str) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
             }
 
             if let Some(extension) = path.extension() {
@@ -93,6 +105,13 @@ where
 
         let tree = self.parser.parse(content, None).ok_or(ParsingFailed(path.to_path_buf()))?;
 
-        Ok(extract_chunks(&tree, content, path, language))
+        Ok(extract_chunks(
+            &tree,
+            content,
+            path,
+            language,
+            self.config.chunk_size_limit,
+            self.config.overlap_percentage,
+        ))
     }
 }

@@ -57,6 +57,10 @@ struct Scan {
     #[arg(long, default_value = "http://localhost:6333")]
     qdrant_url: String,
 
+    /// Collection name for storage
+    #[arg(long, default_value = "code-sherpa")]
+    collection: String,
+
     /// Filter by file extensions (comma-separated)
     #[arg(short, long)]
     extensions: Option<String>,
@@ -64,6 +68,10 @@ struct Scan {
     /// Chunk size limit (in bytes)
     #[arg(short, long)]
     chunk_size_limit: Option<usize>,
+
+    /// Percentage of overlap between chunks (default: 10%)
+    #[arg(long, default_value = "10")]
+    overlap_percentage: Option<usize>,
 
     /// Path to the codebase root
     #[arg(short, long)]
@@ -82,10 +90,10 @@ impl Command for Scan {
     async fn execute(&self) -> Result<()> {
         if !self.path.exists() {
             error!("Path does not exist: {}", self.path.display());
-            return Err(NotFound(self.path));
+            return Err(NotFound(self.path.clone()));
         }
 
-        let model = self.model.unwrap_or(
+        let model = self.model.clone().unwrap_or(
             match self.client {
                 ClientType::Ollama => "nomic-embed-text",
                 ClientType::OpenAI => "gpt-4o",
@@ -101,8 +109,8 @@ impl Command for Scan {
         }
         .map_err(|e| Missing(f!("API key environment variable not set")))?;
 
-        let address = self.address.or(match self.client {
-            ClientType::Ollama => Some(Address::from_str("http://localhost::11434")?),
+        let address = self.address.clone().or(match self.client {
+            ClientType::Ollama => Some(Address::from_str("http://localhost:11434")?),
             // No other clients require an address atm
             _ => None,
         });
@@ -113,15 +121,28 @@ impl Command for Scan {
         // Parse extensions filter if provided
         let extensions = self
             .extensions
+            .clone()
             .map(|ext_str| ext_str.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
 
         if let Some(ref exts) = extensions {
             info!("Filtering by extensions: {}", exts.join(", "));
         }
 
+        if let Some(chunk_size) = self.chunk_size_limit {
+            info!("Using chunk size limit: {} bytes", chunk_size);
+        }
+
+        info!(
+            "Using chunk overlap: {}%",
+            self.overlap_percentage.unwrap_or(10)
+        );
+
         let embedding_client = match self.client {
             ClientType::Ollama => {
-                let address = self.address.unwrap_or(Address::from_str("http://localhost::11434")?);
+                let address = self.address.clone().unwrap_or_else(|| {
+                    Address::from_str("http://localhost:11434")
+                        .expect("Default address should be valid")
+                });
                 EmbeddingClientImpl::Ollama(OllamaEmbeddingClient::new(
                     address.url.as_str(),
                     address.port.unwrap_or(11434),
@@ -129,10 +150,12 @@ impl Command for Scan {
                     self.chunk_size_limit,
                 ))
             },
-            ClientType::OpenAI =>
-                EmbeddingClientImpl::OpenAI(OpenAIEmbeddingClient::new(&api_key, &model)),
-            ClientType::HuggingFace =>
-                EmbeddingClientImpl::HuggingFace(HuggingFaceEmbeddingClient::new(&api_key, &model)),
+            ClientType::OpenAI => {
+                EmbeddingClientImpl::OpenAI(OpenAIEmbeddingClient::new(&api_key, &model))
+            },
+            ClientType::HuggingFace => {
+                EmbeddingClientImpl::HuggingFace(HuggingFaceEmbeddingClient::new(&api_key, &model))
+            },
         };
 
         let storage = QdrantStorage::new(&self.qdrant_url).await?;
@@ -141,9 +164,10 @@ impl Command for Scan {
         let scanner_config = ScannerConfig {
             extensions,
             chunk_size_limit: self.chunk_size_limit,
+            overlap_percentage: self.overlap_percentage,
         };
 
-        let mut scanner = CodebaseScanner::new(embedding_client.into(), storage, scanner_config);
+        let mut scanner = CodebaseScanner::new(embedding_client, storage, scanner_config);
 
         match scanner.scan_codebase(&self.path).await {
             Ok(results) => {
