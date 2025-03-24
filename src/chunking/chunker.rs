@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use tracing::info;
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
 use super::preprocess::preprocess_code;
@@ -57,8 +58,38 @@ impl Chunker {
                     (macro_definition) @macro
                     )"
                 },
-                // ... other language patterns
-                _ => "",
+                SupportedParsers::Python => {
+                    "(
+                    (function_definition) @function
+                    (class_definition) @class
+                    (decorated_definition) @decorated
+                    (if_statement) @if
+                    (for_statement) @for
+                    (while_statement) @while
+                    )"
+                },
+                SupportedParsers::JavaScript
+                | SupportedParsers::TypeScript
+                | SupportedParsers::TSX => {
+                    "(
+                    (function_declaration) @function
+                    (method_definition) @method
+                    (class_declaration) @class
+                    (arrow_function) @arrow_function
+                    (variable_declaration (variable_declarator value: (function))) @function_var
+                    (variable_declaration (variable_declarator value: (arrow_function))) @arrow_var
+                    (export_statement) @export
+                    )"
+                },
+                SupportedParsers::Go => {
+                    "(
+                    (function_declaration) @function
+                    (method_declaration) @method
+                    (type_declaration) @type
+                    (struct_type) @struct
+                    (interface_type) @interface
+                    )"
+                },
             },
         );
 
@@ -133,6 +164,7 @@ impl Chunker {
         // Add context information to the chunk
         add_chunk_context(&mut chunk, node, &self.source, parent_node);
 
+        info!("Extracted a chunk");
         chunks.push(chunk);
 
         // Process child nodes recursively for nested structures

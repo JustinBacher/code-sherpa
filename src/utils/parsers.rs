@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
-use strum::{Display, EnumString, VariantNames};
+use strum::Display;
 use tree_sitter::Language;
 
-#[derive(
-    Debug, Clone, Serialize, Deserialize, EnumString, VariantNames, PartialEq, Eq, Hash, Display,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, Display)]
 pub enum SupportedParsers {
     #[serde(rename = "rs")]
     Rust,
@@ -21,8 +19,8 @@ pub enum SupportedParsers {
     #[serde(rename = "ts")]
     TypeScript,
 
-    #[allow(non_camel_case_types)]
     #[serde(rename = "tsx")]
+    #[allow(clippy::upper_case_acronyms)]
     TSX,
 }
 

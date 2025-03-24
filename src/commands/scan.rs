@@ -14,6 +14,7 @@ use crate::{
     prelude::*,
     scanner::{CodebaseScanner, ScannerConfig},
     storage::QdrantStorage,
+    utils::path_to_collection_name,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -41,8 +42,8 @@ enum ClientType {
     HuggingFace,
 }
 
-#[derive(Debug, Parser, Serialize, Deserialize)]
-struct Scan {
+#[derive(Debug, Parser, Serialize, Deserialize, Clone)]
+pub struct Scan {
     #[arg(long, value_enum)]
     client: ClientType,
 
@@ -54,7 +55,7 @@ struct Scan {
     model: Option<String>,
 
     /// Qdrant URL
-    #[arg(long, default_value = "http://localhost:6333")]
+    #[arg(long, default_value = "http://localhost:6334")]
     qdrant_url: String,
 
     /// Collection name for storage
@@ -107,13 +108,7 @@ impl Command for Scan {
             ClientType::OpenAI => env::var("OPENAI_API_KEY"),
             ClientType::HuggingFace => env::var("HUGGINGFACE_API_KEY"),
         }
-        .map_err(|e| Missing(f!("API key environment variable not set")))?;
-
-        let address = self.address.clone().or(match self.client {
-            ClientType::Ollama => Some(Address::from_str("http://localhost:11434")?),
-            // No other clients require an address atm
-            _ => None,
-        });
+        .map_err(|_| Missing(String::from("API key environment variable not set")))?;
 
         info!("Scanning codebase at {}", self.path.display());
         info!("Using embedding model: {}", model);
@@ -158,11 +153,11 @@ impl Command for Scan {
             },
         };
 
-        let storage = QdrantStorage::new(&self.qdrant_url).await?;
+        let storage =
+            QdrantStorage::new(&self.qdrant_url, &path_to_collection_name(&self.path)).await?;
 
         info!("Starting codebase scan");
         let scanner_config = ScannerConfig {
-            extensions,
             chunk_size_limit: self.chunk_size_limit,
             overlap_percentage: self.overlap_percentage,
         };

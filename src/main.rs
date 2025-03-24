@@ -11,7 +11,7 @@ use clap::Parser;
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
 
-use commands::Args;
+use commands::{Args, Command, Commands};
 use prelude::*;
 
 /// Codebase scanner that uses Tree-sitter to parse code and prepare it for RAG
@@ -31,6 +31,8 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    // Check if path exists
-    Ok(())
+    match args.command {
+        Commands::Scan(cmd) => cmd.execute().await,
+        Commands::Query(cmd) => cmd.execute().await,
+    }
 }

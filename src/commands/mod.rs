@@ -6,6 +6,7 @@ use query::Query;
 use scan::Scan;
 
 #[derive(Subcommand, Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     Scan(Scan),
     Query(Query),
@@ -14,7 +15,7 @@ pub enum Commands {
 #[derive(Parser, Debug)]
 pub struct Args {
     #[command(subcommand)]
-    command: Commands,
+    pub command: Commands,
 
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,

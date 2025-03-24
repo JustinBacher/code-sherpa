@@ -11,6 +11,7 @@ use crate::{chunking::CodeChunk, embedding::Embedding, prelude::*};
 
 pub struct QdrantStorage {
     client: Qdrant,
+    collection_name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -23,11 +24,16 @@ struct ChunkMetadata {
 }
 
 impl QdrantStorage {
-    pub async fn new(url: &str) -> Result<Self> {
-        let client =
-            Qdrant::from_url(url).build().map_err(|e| Error::StorageError(e.to_string()))?;
+    pub async fn new(url: &str, collection_name: &str) -> Result<Self> {
+        let client = Qdrant::from_url(url)
+            .skip_compatibility_check()
+            .build()
+            .map_err(|e| Error::StorageError(e.to_string()))?;
 
-        let storage = Self { client };
+        let storage = Self {
+            client,
+            collection_name: collection_name.to_string(),
+        };
 
         // Ensure collection exists
         storage.ensure_collection().await?;
@@ -44,16 +50,18 @@ impl QdrantStorage {
             .map_err(|e| Error::StorageError(e.to_string()))?;
 
         // Need the collection name to be the project root
-        let exists = collections.collections.iter().any(|c| c.name == "");
+        let exists = collections.collections.iter().any(|c| c.name == self.collection_name);
 
         if !exists {
             // Create the collection
-            self.client.create_collection(CreateCollection {
-                collection_name: String::from(""),
-                hnsw_config: None,
-                vectors_config: None,
-                ..Default::default()
-            });
+            self.client
+                .create_collection(CreateCollection {
+                    collection_name: self.collection_name.clone(),
+                    hnsw_config: None,
+                    vectors_config: None,
+                    ..Default::default()
+                })
+                .await?;
         }
 
         Ok(())
@@ -105,7 +113,7 @@ impl Storage for QdrantStorage {
         for batch in points.chunks(100) {
             self.client
                 .upsert_points(UpsertPoints {
-                    collection_name: "".to_string(),
+                    collection_name: self.collection_name.clone(),
                     wait: None,
                     points: batch.to_vec(),
                     ordering: None,
