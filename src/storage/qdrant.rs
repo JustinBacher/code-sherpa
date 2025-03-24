@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 
 use qdrant_client::{
-    Payload, Qdrant,
-    qdrant::{CreateCollectionBuilder, PointId, PointStruct, UpsertPointsBuilder, Value},
+    Qdrant,
+    qdrant::{
+        CreateCollectionBuilder, Distance, PointId, PointStruct, UpsertPointsBuilder, Value,
+        VectorParams, VectorParamsMap, Vectors, VectorsConfig, vectors_config::Config,
+    },
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -13,6 +16,7 @@ use crate::{chunking::CodeChunk, embedding::Embedding, prelude::*};
 pub struct QdrantStorage {
     client: Qdrant,
     collection_name: String,
+    vector_name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,6 +38,7 @@ impl QdrantStorage {
         let storage = Self {
             client,
             collection_name: collection_name.to_string(),
+            vector_name: "code".to_string(),
         };
 
         // Ensure collection exists
@@ -54,9 +59,25 @@ impl QdrantStorage {
         let exists = collections.collections.iter().any(|c| c.name == self.collection_name);
 
         if !exists {
-            // Create the collection
+            // Create the collection with named vectors
+            let mut vector_params = HashMap::new();
+            vector_params.insert(
+                self.vector_name.clone(),
+                VectorParams {
+                    size: 768,
+                    distance: Distance::Cosine.into(),
+                    ..Default::default()
+                },
+            );
+
             self.client
-                .create_collection(CreateCollectionBuilder::new(self.collection_name.clone()))
+                .create_collection(
+                    CreateCollectionBuilder::new(self.collection_name.clone())
+                        .vectors_config(VectorsConfig {
+                            config: Some(Config::ParamsMap(VectorParamsMap { map: vector_params })),
+                        })
+                        .build(),
+                )
                 .await?;
         }
 
@@ -75,13 +96,10 @@ impl Storage for QdrantStorage {
         let mut points = Vec::with_capacity(chunks.len());
 
         for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
-            // Create metadata
             let mut payload = HashMap::new();
 
-            // Add code content
             payload.insert("content".to_string(), Value::from(chunk.content.clone()));
 
-            // Add metadata
             let metadata = ChunkMetadata {
                 path: chunk.path.to_string_lossy().to_string(),
                 node_type: chunk.node_type.clone(),
@@ -95,12 +113,14 @@ impl Storage for QdrantStorage {
 
             payload.insert("metadata".to_string(), Value::from(metadata_json));
 
-            // Create point
-            let point = PointStruct::new(
-                PointId::from(Uuid::new_v4().to_string()),
-                embedding.clone(),
-                Payload::from(payload),
-            );
+            let mut vectors = HashMap::new();
+            vectors.insert(self.vector_name.clone(), embedding.clone());
+
+            let point = PointStruct {
+                id: Some(PointId::from(Uuid::new_v4().to_string())),
+                vectors: Some(Vectors::from(vectors)),
+                payload,
+            };
 
             points.push(point);
         }

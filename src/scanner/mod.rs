@@ -1,4 +1,5 @@
 mod results;
+#[allow(clippy::module_inception)]
 mod scanner;
 
 #[allow(unused_imports)]

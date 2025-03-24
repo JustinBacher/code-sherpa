@@ -158,9 +158,8 @@ impl Chunker {
                         }
 
                         // Create the chunk
-                        let chunk_text = preprocess_code(&node, &self.source);
                         let mut chunk = CodeChunk {
-                            content: chunk_text,
+                            content: preprocess_code(&node, &self.source),
                             node_type: node.kind().to_string(),
                             start_line: node.start_position().row,
                             end_line: node.end_position().row,
