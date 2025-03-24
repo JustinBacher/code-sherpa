@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tracing::info;
+use tracing::{debug, warn};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
 use super::preprocess::preprocess_code;
@@ -43,71 +43,25 @@ impl Chunker {
     pub fn extract_chunks(&self) -> Vec<CodeChunk> {
         let mut chunks = Vec::new();
         let root_node = self.tree.root_node();
+        debug!("Extracting chunks from {}", self.path.display());
 
-        // Execute the query inside this method instead of storing the matches
-        let query_result = Query::new(
-            &self.language.language(),
-            match self.language {
-                SupportedParsers::Rust => {
-                    "(
-                    (function_item) @function
-                    (struct_item) @struct
-                    (impl_item) @impl
-                    (trait_item) @trait
-                    (enum_item) @enum
-                    (macro_definition) @macro
-                    )"
-                },
-                SupportedParsers::Python => {
-                    "(
-                    (function_definition) @function
-                    (class_definition) @class
-                    (decorated_definition) @decorated
-                    (if_statement) @if
-                    (for_statement) @for
-                    (while_statement) @while
-                    )"
-                },
-                SupportedParsers::JavaScript
-                | SupportedParsers::TypeScript
-                | SupportedParsers::TSX => {
-                    "(
-                    (function_declaration) @function
-                    (method_definition) @method
-                    (class_declaration) @class
-                    (arrow_function) @arrow_function
-                    (variable_declaration (variable_declarator value: (function))) @function_var
-                    (variable_declaration (variable_declarator value: (arrow_function))) @arrow_var
-                    (export_statement) @export
-                    )"
-                },
-                SupportedParsers::Go => {
-                    "(
-                    (function_declaration) @function
-                    (method_declaration) @method
-                    (type_declaration) @type
-                    (struct_type) @struct
-                    (interface_type) @interface
-                    )"
-                },
-            },
-        );
-
-        if let Ok(query) = query_result {
-            let mut query_cursor = QueryCursor::new();
-            let mut matches = query_cursor.matches(&query, root_node, self.source.as_bytes());
-
-            // Process matches directly here
-            while let Some(r#match) = matches.next() {
-                for capture in r#match.captures {
-                    let node = capture.node;
-                    self.extract_chunk_from_node(node, None, &mut chunks);
-                }
-            }
+        // First, try structured queries for common language constructs
+        let structured_chunks = self.extract_structured_chunks(root_node);
+        if !structured_chunks.is_empty() {
+            chunks.extend(structured_chunks);
         }
 
-        // If no chunks were found, create a chunk for the whole file
+        // If structured queries didn't work, fall back to a general approach
+        if chunks.is_empty() {
+            chunks.extend(self.extract_general_chunks(root_node));
+        }
+
+        // If we still have no chunks, use the whole file
         if chunks.is_empty() && !self.source.is_empty() {
+            debug!(
+                "No specific chunks found, using entire file: {}",
+                self.path.display()
+            );
             chunks.push(CodeChunk {
                 content: preprocess_code(&root_node, &self.source),
                 node_type: "file".to_string(),
@@ -122,99 +76,235 @@ impl Chunker {
         let mut final_chunks = Vec::new();
         for chunk in chunks {
             if chunk.content.len() > self.max_chunk_size {
-                final_chunks.extend(split_large_chunk(
-                    &chunk,
-                    self.max_chunk_size,
-                    self.overlap_percentage,
-                ));
+                let split = split_large_chunk(&chunk, self.max_chunk_size, self.overlap_percentage);
+                final_chunks.extend(split);
             } else {
                 final_chunks.push(chunk);
             }
         }
 
+        debug!(
+            "Extracted {} chunks from {}",
+            final_chunks.len(),
+            self.path.display()
+        );
         final_chunks
     }
 
-    fn extract_chunk_from_node(
-        &self,
-        node: Node,
-        parent_node: Option<Node>,
-        chunks: &mut Vec<CodeChunk>,
-    ) {
-        // Skip nodes that are too small
-        if node.start_position().row == node.end_position().row
-            && node.end_position().column - node.start_position().column < 10
-        {
-            return;
-        }
+    // Extract chunks using structured, language-specific queries
+    fn extract_structured_chunks(&self, root_node: Node) -> Vec<CodeChunk> {
+        let mut chunks = Vec::new();
 
-        // Preprocess the node content to remove unnecessary whitespace and comments
-        let chunk_text = preprocess_code(&node, &self.source);
-
-        // Create the chunk
-        let mut chunk = CodeChunk {
-            content: chunk_text,
-            node_type: node.kind().to_string(),
-            start_line: node.start_position().row,
-            end_line: node.end_position().row,
-            path: self.path.clone(),
-            language: self.language.to_string(),
+        // Get language-specific query
+        let query_str = match self.language {
+            SupportedParsers::Rust => {
+                "(
+                (function_item) @function
+                (struct_item) @struct
+                (impl_item) @impl
+                (trait_item) @trait
+                (enum_item) @enum
+                (mod_item) @mod
+                (macro_definition) @macro
+                )"
+            },
+            SupportedParsers::Python => {
+                "(
+                (function_definition) @function
+                (class_definition) @class
+                (decorated_definition) @decorated
+                (if_statement) @if
+                (for_statement) @for
+                (while_statement) @while
+                )"
+            },
+            SupportedParsers::JavaScript | SupportedParsers::TypeScript | SupportedParsers::TSX => {
+                "(
+                (function_declaration) @function
+                (method_definition) @method
+                (class_declaration) @class
+                (arrow_function) @arrow_function
+                (export_statement) @export
+                (lexical_declaration) @declaration
+                )"
+            },
+            SupportedParsers::Go => {
+                "(
+                (function_declaration) @function
+                (method_declaration) @method
+                (type_declaration) @type
+                (struct_type) @struct
+                (interface_type) @interface
+                )"
+            },
         };
 
-        // Add context information to the chunk
-        add_chunk_context(&mut chunk, node, &self.source, parent_node);
+        // Execute the query
+        match Query::new(&self.language.language(), query_str) {
+            Ok(query) => {
+                let mut query_cursor = QueryCursor::new();
+                let mut matches = query_cursor.matches(&query, root_node, self.source.as_bytes());
 
-        info!("Extracted a chunk");
-        chunks.push(chunk);
+                // Process each match directly - no recursion
+                while let Some(match_result) = matches.next() {
+                    for capture in match_result.captures {
+                        let node = capture.node;
 
-        // Process child nodes recursively for nested structures
-        let child_count = node.named_child_count();
-        for i in 0..child_count {
-            if let Some(child) = node.named_child(i) {
-                // Skip very small child nodes
-                if is_significant_node(&child) {
-                    self.extract_chunk_from_node(child, Some(node), chunks);
+                        // Skip very small nodes
+                        if node.start_position().row == node.end_position().row
+                            && node.end_position().column - node.start_position().column < 3
+                        {
+                            continue;
+                        }
+
+                        // Create the chunk
+                        let chunk_text = preprocess_code(&node, &self.source);
+                        let mut chunk = CodeChunk {
+                            content: chunk_text,
+                            node_type: node.kind().to_string(),
+                            start_line: node.start_position().row,
+                            end_line: node.end_position().row,
+                            path: self.path.clone(),
+                            language: self.language.to_string(),
+                        };
+
+                        add_chunk_context(&mut chunk, node, &self.source, node.parent());
+
+                        chunks.push(chunk);
+                    }
                 }
+            },
+            Err(e) => {
+                warn!(
+                    "Failed to create query for language {:?}: {}",
+                    self.language, e
+                );
+            },
+        }
+
+        chunks
+    }
+
+    // Extract chunks using a general approach when language-specific queries fail
+    fn extract_general_chunks(&self, root_node: Node) -> Vec<CodeChunk> {
+        let mut chunks = Vec::new();
+
+        // Use a generic query to find blocks and statements
+        let general_query = "(
+            (block) @block
+            (statement) @statement
+            (declaration) @declaration
+        )";
+
+        match Query::new(&self.language.language(), general_query) {
+            Ok(query) => {
+                let mut query_cursor = QueryCursor::new();
+                let mut matches = query_cursor.matches(&query, root_node, self.source.as_bytes());
+
+                while let Some(match_result) = matches.next() {
+                    for capture in match_result.captures {
+                        let node = capture.node;
+
+                        // Only consider substantial blocks
+                        if node.end_position().row - node.start_position().row < 3 {
+                            continue;
+                        }
+
+                        // Create the chunk
+                        let chunk_text = preprocess_code(&node, &self.source);
+                        chunks.push(CodeChunk {
+                            content: chunk_text,
+                            node_type: node.kind().to_string(),
+                            start_line: node.start_position().row,
+                            end_line: node.end_position().row,
+                            path: self.path.clone(),
+                            language: self.language.to_string(),
+                        });
+                    }
+                }
+            },
+            Err(_) => {
+                // If even general query fails, try line-based chunking
+                debug!(
+                    "Falling back to section-based chunking for {}",
+                    self.path.display()
+                );
+                chunks.extend(self.extract_section_chunks());
+            },
+        }
+
+        chunks
+    }
+
+    // Extract chunks based on natural sections in the code
+    fn extract_section_chunks(&self) -> Vec<CodeChunk> {
+        let mut chunks = Vec::new();
+        let lines: Vec<&str> = self.source.lines().collect();
+
+        if lines.is_empty() {
+            return chunks;
+        }
+
+        let mut section_start = 0;
+        let mut blank_line_count = 0;
+        let mut in_comment_block = false;
+
+        // Look for natural sections separated by blank lines or comment blocks
+        for (i, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+
+            // Track comment blocks
+            if trimmed.starts_with("/*") || trimmed.starts_with("/**") {
+                in_comment_block = true;
+            }
+            if trimmed.ends_with("*/") {
+                in_comment_block = false;
+                blank_line_count = 0;
+                continue;
+            }
+
+            // Count consecutive blank lines
+            if trimmed.is_empty() && !in_comment_block {
+                blank_line_count += 1;
+            } else {
+                blank_line_count = 0;
+            }
+
+            // Start a new section after 2+ blank lines or at substantial section size
+            if (blank_line_count >= 2 && i - section_start > 5) || i - section_start >= 100 {
+                let section_content = lines[section_start..i].join("\n");
+                if !section_content.trim().is_empty() {
+                    chunks.push(CodeChunk {
+                        content: section_content,
+                        node_type: "section".to_string(),
+                        start_line: section_start,
+                        end_line: i,
+                        path: self.path.clone(),
+                        language: self.language.to_string(),
+                    });
+                }
+                section_start = i + 1;
+                blank_line_count = 0;
             }
         }
+
+        // Add the last section
+        if section_start < lines.len() {
+            let section_content = lines[section_start..].join("\n");
+            if !section_content.trim().is_empty() {
+                chunks.push(CodeChunk {
+                    content: section_content,
+                    node_type: "section".to_string(),
+                    start_line: section_start,
+                    end_line: lines.len(),
+                    path: self.path.clone(),
+                    language: self.language.to_string(),
+                });
+            }
+        }
+
+        chunks
     }
-}
-
-/// Check if a node is significant enough to be processed as a chunk
-fn is_significant_node(node: &Node) -> bool {
-    let node_type = node.kind();
-
-    // Skip comment nodes
-    if node_type.contains("comment") {
-        return false;
-    }
-
-    // Skip nodes that are too small
-    if node.start_position().row == node.end_position().row
-        && node.end_position().column - node.start_position().column < 20
-    {
-        return false;
-    }
-
-    matches!(
-        node_type,
-        "function_item"
-            | "method"
-            | "class"
-            | "struct_item"
-            | "impl_item"
-            | "trait_item"
-            | "enum_item"
-            | "type_declaration"
-            | "function_declaration"
-            | "method_declaration"
-            | "class_declaration"
-            | "function_definition"
-            | "class_definition"
-            | "interface_type"
-            | "decorated_definition"
-            | "arrow_function"
-    )
 }
 
 /// Extract chunks from a tree-sitter parse tree

@@ -45,4 +45,7 @@ pub enum Error {
 
     #[error(transparent)]
     QdrantError(#[from] qdrant_client::QdrantError),
+
+    #[error("Unable to serialize payload: {0}")]
+    PayloadError(String),
 }

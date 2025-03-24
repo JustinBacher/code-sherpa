@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 
 use qdrant_client::{
-    Qdrant,
-    qdrant::{CreateCollection, PointStruct, UpsertPoints, Value},
+    Payload, Qdrant,
+    qdrant::{CreateCollectionBuilder, PointId, PointStruct, UpsertPointsBuilder, Value},
 };
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use super::client::Storage;
 use crate::{chunking::CodeChunk, embedding::Embedding, prelude::*};
@@ -55,12 +56,7 @@ impl QdrantStorage {
         if !exists {
             // Create the collection
             self.client
-                .create_collection(CreateCollection {
-                    collection_name: self.collection_name.clone(),
-                    hnsw_config: None,
-                    vectors_config: None,
-                    ..Default::default()
-                })
+                .create_collection(CreateCollectionBuilder::new(self.collection_name.clone()))
                 .await?;
         }
 
@@ -78,7 +74,7 @@ impl Storage for QdrantStorage {
 
         let mut points = Vec::with_capacity(chunks.len());
 
-        for (i, (chunk, embedding)) in chunks.iter().zip(embeddings.iter()).enumerate() {
+        for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
             // Create metadata
             let mut payload = HashMap::new();
 
@@ -100,11 +96,11 @@ impl Storage for QdrantStorage {
             payload.insert("metadata".to_string(), Value::from(metadata_json));
 
             // Create point
-            let point = PointStruct {
-                id: Some(i.to_string().into()),
-                vectors: Some(embedding.clone().into()),
-                payload,
-            };
+            let point = PointStruct::new(
+                PointId::from(Uuid::new_v4().to_string()),
+                embedding.clone(),
+                Payload::from(payload),
+            );
 
             points.push(point);
         }
@@ -112,13 +108,10 @@ impl Storage for QdrantStorage {
         // Store points in batches of 100
         for batch in points.chunks(100) {
             self.client
-                .upsert_points(UpsertPoints {
-                    collection_name: self.collection_name.clone(),
-                    wait: None,
-                    points: batch.to_vec(),
-                    ordering: None,
-                    shard_key_selector: None,
-                })
+                .upsert_points(
+                    UpsertPointsBuilder::new(self.collection_name.clone(), batch.to_vec())
+                        .wait(true),
+                )
                 .await
                 .map_err(|e| Error::StorageError(e.to_string()))?;
         }
