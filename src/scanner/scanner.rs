@@ -57,7 +57,6 @@ where
                 continue;
             }
 
-            info!("Reading file: {}", path.display());
             if let Some(extension) = path.extension() {
                 if let Ok(parser) =
                     serde_plain::from_str::<SupportedParsers>(&extension.to_string_lossy())

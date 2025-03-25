@@ -31,4 +31,20 @@ impl EmbeddingClient for EmbeddingClientImpl {
             Self::HuggingFace(client) => client.embed(chunks).await,
         }
     }
+
+    async fn context_length(&mut self) -> Result<usize> {
+        match self {
+            Self::Ollama(client) => client.context_length().await,
+            Self::OpenAI(client) => client.context_length().await,
+            Self::HuggingFace(client) => client.context_length().await,
+        }
+    }
+
+    async fn embed_length(&mut self) -> Result<usize> {
+        match self {
+            Self::Ollama(client) => client.embed_length().await,
+            Self::OpenAI(client) => client.embed_length().await,
+            Self::HuggingFace(client) => client.embed_length().await,
+        }
+    }
 }

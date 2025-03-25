@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+backtrace = { version = "0.3.74", features = ["coresymbolication"] }
 clap = { version = "4.5.32", features = ["derive", "env"] }
 gix = "0.70.0"
 huggingface = "0.1.0"

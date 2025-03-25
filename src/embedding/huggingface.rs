@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::Serialize;
 
 use super::{Embedding, client::EmbeddingClient};
-use crate::{chunking::CodeChunk, error::Error};
+use crate::{chunking::CodeChunk, prelude::*};
 
 #[derive(Debug, Clone)]
 pub struct HuggingFaceEmbeddingClient {
@@ -34,9 +34,15 @@ impl HuggingFaceEmbeddingClient {
 }
 
 impl EmbeddingClient for HuggingFaceEmbeddingClient {
-    async fn embed(&self, _chunks: &[CodeChunk]) -> Result<Vec<Embedding>, Error> {
+    async fn embed(&self, _chunks: &[CodeChunk]) -> Result<Vec<Embedding>> {
         // Implementation for HuggingFace API
         // Similar to OpenAI but with different endpoint and request format
         todo!("Implement HuggingFace embedding client")
+    }
+    async fn context_length(&mut self) -> Result<usize> {
+        todo!("Implement HuggingFace context length")
+    }
+    async fn embed_length(&mut self) -> Result<usize> {
+        todo!("Implement HuggingFace embed length")
     }
 }

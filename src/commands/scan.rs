@@ -8,7 +8,7 @@ use url::Url;
 use super::Command;
 use crate::{
     embedding::{
-        EmbeddingClientImpl, HuggingFaceEmbeddingClient, OllamaEmbeddingClient,
+        EmbeddingClient, EmbeddingClientImpl, HuggingFaceEmbeddingClient, OllamaEmbeddingClient,
         OpenAIEmbeddingClient,
     },
     prelude::*,
@@ -132,14 +132,14 @@ impl Command for Scan {
             self.overlap_percentage.unwrap_or(10)
         );
 
-        let embedding_client = match self.client {
+        let mut embedding_client = match self.client {
             ClientType::Ollama => {
                 let address = self.address.clone().unwrap_or_else(|| {
                     Address::from_str("http://localhost:11434")
                         .expect("Default address should be valid")
                 });
                 EmbeddingClientImpl::Ollama(OllamaEmbeddingClient::new(
-                    address.url.as_str(),
+                    address.url,
                     address.port.unwrap_or(11434),
                     &model,
                     self.chunk_size_limit,
@@ -153,8 +153,12 @@ impl Command for Scan {
             },
         };
 
-        let storage =
-            QdrantStorage::new(&self.qdrant_url, &path_to_collection_name(&self.path)).await?;
+        let storage = QdrantStorage::new(
+            &self.qdrant_url,
+            &path_to_collection_name(&self.path),
+            embedding_client.embed_length().await?,
+        )
+        .await?;
 
         info!("Starting codebase scan");
         let scanner_config = ScannerConfig {

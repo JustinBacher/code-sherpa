@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use tree_sitter::{Node, Query, QueryCursor, StreamingIterator, Tree};
 
 use super::preprocess::preprocess_code;
@@ -45,13 +45,11 @@ impl Chunker {
         let root_node = self.tree.root_node();
         debug!("Extracting chunks from {}", self.path.display());
 
-        // First, try structured queries for common language constructs
         let structured_chunks = self.extract_structured_chunks(root_node);
         if !structured_chunks.is_empty() {
             chunks.extend(structured_chunks);
         }
 
-        // If structured queries didn't work, fall back to a general approach
         if chunks.is_empty() {
             chunks.extend(self.extract_general_chunks(root_node));
         }
@@ -95,14 +93,17 @@ impl Chunker {
     fn extract_structured_chunks(&self, root_node: Node) -> Vec<CodeChunk> {
         let mut chunks = Vec::new();
 
-        // Get language-specific query
         let query_str = match self.language {
             SupportedParsers::Rust => {
                 "(
                 (function_item) @function
                 (struct_item) @struct
-                (impl_item) @impl
-                (trait_item) @trait
+                (impl_item
+                    body: (declaration_list
+                        (function_item) @impl_method))
+                (trait_item
+                    body: (declaration_list
+                        (function_item) @trait_method))
                 (enum_item) @enum
                 (mod_item) @mod
                 (macro_definition) @macro
@@ -149,6 +150,7 @@ impl Chunker {
                 while let Some(match_result) = matches.next() {
                     for capture in match_result.captures {
                         let node = capture.node;
+                        let kind = node.kind();
 
                         // Skip very small nodes
                         if node.start_position().row == node.end_position().row
@@ -157,10 +159,16 @@ impl Chunker {
                             continue;
                         }
 
+                        info!("Kind: {}", kind);
+                        // Capture child chunks
+                        if kind == "impl_item" || kind == "trait_item" {
+                            self.extract_structured_chunks(node);
+                        }
+
                         // Create the chunk
                         let mut chunk = CodeChunk {
                             content: preprocess_code(&node, &self.source),
-                            node_type: node.kind().to_string(),
+                            node_type: kind.to_string(),
                             start_line: node.start_position().row,
                             end_line: node.end_position().row,
                             path: self.path.clone(),
@@ -203,6 +211,7 @@ impl Chunker {
                 while let Some(match_result) = matches.next() {
                     for capture in match_result.captures {
                         let node = capture.node;
+                        info!("General Kind: {}", node.kind());
 
                         // Only consider substantial blocks
                         if node.end_position().row - node.start_position().row < 3 {
